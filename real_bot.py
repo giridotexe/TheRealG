@@ -1,17 +1,14 @@
 """
-Instagram Group Chat "Real" Auto-Reply Bot (Browser Version)
-------------------------------------------------------------
+Instagram Group Chat Auto-Reply Bot (Local + Headless Version)
+--------------------------------------------------------------
 Watches an Instagram group chat in Chromium using Playwright.
-Whenever another member sends "real" or "Real", it waits ~2 seconds
-(with slight random jitter) and replies "Real".
 
 Features:
-- Visible setup mode: opens Chromium, lets you log in and pick your group chat,
-  and automatically saves the group chat URL to `chat_url.txt` next to this script.
-- Headless mode (`--headless`): runs invisibly in the background using your
-  saved `ig_profile` session and saved `chat_url.txt` (or `--chat-url`).
-- Anti-spam cooldown (10s) and natural reply jitter (1.8s - 2.4s).
-- Auto-recovery: automatically reloads the chat if Wi-Fi drops or the page stalls.
+- Case-insensitive multi-trigger & multi-output replies via TRIGGER_REPLIES
+  (each trigger can map to a single string or a list of random replies).
+- Visible setup mode (default) and headless background mode (`--headless`).
+- Natural delay jitter (1.8s - 2.4s), 3s anti-spam cooldown, loop protection,
+  and automatic page reload on Wi-Fi/page drops.
 
 Intended for private, consenting group chats for entertainment purposes.
 """
@@ -25,19 +22,31 @@ from pathlib import Path
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import sync_playwright
 
-# --- Configuration (always stored right next to real_bot.py) ---
+# --- Configuration (all local files stay next to real_bot.py) ---
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROFILE_DIR = SCRIPT_DIR / "ig_profile"
 CHAT_URL_FILE = SCRIPT_DIR / "chat_url.txt"
+STATE_FILE = SCRIPT_DIR / "ig_state.json"
 
-TRIGGERS = {"real", "Real"}
-REPLY_TEXT = "Real"
+# Case-insensitive static triggers (keep keys lowercase).
+# Each value can be a single string OR a list of strings (the bot picks one at random).
+TRIGGER_REPLIES: dict[str, str | list[str]] = {
+    "real": ["Real"],
+    "bruh": ["Bruh", "Bro..."],
+    "fr": ["Fr fr"],
+    "cap": ["Stop the cap"],
+    "badar k ho?": ["Chhakka", "Gay", "Badar more like Fatdar"],
+    "skwaii k ho?": ["Chinker", "Chinese", "Chhakka ho"],
+    "talai kasle banako?": ["Giri dada le"],
+    "goat": ["Goat? Ko? Giri? Real"],
+    "@sa.shang": ["Girlfriend sanga hola pakka", "Marisakyo tyo", "Khai k gardai hola mote"],
+}
 
 # Slight natural jitter around 2 seconds
 REPLY_DELAY_MIN = 1.8
 REPLY_DELAY_MAX = 2.4
 
-# Minimum gap between bot replies (prevents spam-filter triggers if friends spam "real")
+# Minimum gap between bot replies (prevents spam-filter triggers if friends spam)
 COOLDOWN_SECONDS = 3.0
 
 CHECK_INTERVAL_SECONDS = 0.5
@@ -110,6 +119,18 @@ SCAN_MESSAGES_JS = """
 """
 
 
+def compute_reply(text: str) -> str | None:
+    """Return the matching reply for an incoming message, or None if ignored."""
+    lowered = text.lower()
+    if lowered not in TRIGGER_REPLIES:
+        return None
+
+    option = TRIGGER_REPLIES[lowered]
+    if isinstance(option, list):
+        return random.choice(option) if option else None
+    return option
+
+
 def send_reply(page, text: str) -> bool:
     """Click the message box, type real keystrokes (Lexical-compatible), and press Enter."""
     textbox = page.locator('div[role="textbox"][contenteditable="true"]').last
@@ -118,7 +139,7 @@ def send_reply(page, text: str) -> bool:
         return False
 
     textbox.click()
-    page.keyboard.type(text, delay=random.randint(30, 65))
+    page.keyboard.type(text, delay=random.randint(25, 50))
     page.keyboard.press("Enter")
     return True
 
@@ -154,7 +175,7 @@ def open_and_sync_chat(page, chat_url: str, headless: bool) -> bool:
                 sys.exit(1)
         return False
 
-    time.sleep(1.5)  # Give recent message history a moment to finish rendering
+    time.sleep(1.5)
     res = page.evaluate(SCAN_MESSAGES_JS, {"markOnly": True})
     return res.get("error") is None
 
@@ -182,8 +203,38 @@ def get_active_chat_page(context):
     return context.pages[0]
 
 
+def export_session() -> None:
+    """Export portable cookies from ./ig_profile into ig_state.json offline."""
+    if not PROFILE_DIR.exists():
+        print("No ig_profile folder found yet. Run real_bot.py normally to log in first.", flush=True)
+        sys.exit(1)
+
+    print("Exporting saved cookies from ig_profile to ig_state.json (offline)...", flush=True)
+    with sync_playwright() as p:
+        context = p.chromium.launch_persistent_context(
+            user_data_dir=str(PROFILE_DIR),
+            headless=True,
+            viewport={"width": 1280, "height": 850},
+        )
+        try:
+            state = context.storage_state(path=str(STATE_FILE))
+            ig_cookies = [c for c in state.get("cookies", []) if "instagram.com" in c.get("domain", "")]
+            has_session = any(c.get("name") == "sessionid" for c in ig_cookies)
+            print(f"Exported {len(ig_cookies)} Instagram cookies to: {STATE_FILE}", flush=True)
+            if has_session:
+                print("Verified: active Instagram login session (sessionid) found!", flush=True)
+            else:
+                print(
+                    "Warning: no 'sessionid' cookie found. Make sure you are logged in inside ig_profile.",
+                    flush=True,
+                )
+            print("Keep ig_state.json private (it contains your bot's login cookies).", flush=True)
+        finally:
+            context.close()
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Instagram 'Real' group chat auto-reply bot.")
+    parser = argparse.ArgumentParser(description="Instagram group chat auto-reply bot.")
     parser.add_argument(
         "--headless",
         action="store_true",
@@ -194,7 +245,16 @@ def main() -> None:
         default="",
         help="Direct URL of your Instagram group chat (e.g. https://www.instagram.com/direct/t/12345/).",
     )
+    parser.add_argument(
+        "--export-session",
+        action="store_true",
+        help="Export login cookies from ig_profile into portable ig_state.json.",
+    )
     args = parser.parse_args()
+
+    if args.export_session:
+        export_session()
+        return
 
     chat_url = resolve_chat_url(args.chat_url)
 
@@ -211,21 +271,35 @@ def main() -> None:
     print(f"Launching Chromium in {mode_label} mode...", flush=True)
 
     with sync_playwright() as p:
-        context = p.chromium.launch_persistent_context(
-            user_data_dir=str(PROFILE_DIR),
-            headless=args.headless,
-            viewport={"width": 1280, "height": 850},
-        )
-        page = context.pages[0] if context.pages else context.new_page()
+        browser = None
+        use_state_file = args.headless and STATE_FILE.exists() and not PROFILE_DIR.exists()
+
+        if use_state_file:
+            print(f"Loading portable session from {STATE_FILE.name}...", flush=True)
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(
+                storage_state=str(STATE_FILE),
+                viewport={"width": 1280, "height": 850},
+            )
+            page = context.new_page()
+        else:
+            context = p.chromium.launch_persistent_context(
+                user_data_dir=str(PROFILE_DIR),
+                headless=args.headless,
+                viewport={"width": 1280, "height": 850},
+            )
+            page = context.pages[0] if context.pages else context.new_page()
 
         if args.headless:
             print(f"Opening saved group chat: {chat_url}", flush=True)
             while not open_and_sync_chat(page, chat_url, headless=True):
                 print(
-                    f"Could not load chat (Wi-Fi or Instagram blip). Retrying in {RELOAD_RETRY_SECONDS:.0f}s...",
+                    f"Could not load chat (network or Instagram blip). Retrying in {RELOAD_RETRY_SECONDS:.0f}s...",
                     flush=True,
                 )
                 time.sleep(RELOAD_RETRY_SECONDS)
+            if use_state_file:
+                context.storage_state(path=str(STATE_FILE))
             print("Connected in headless mode! Watching for new messages...", flush=True)
         else:
             start_url = chat_url or "https://www.instagram.com/direct/inbox/"
@@ -241,12 +315,12 @@ def main() -> None:
             live_url = page.evaluate("() => window.location.href") or page.url
             print(f"Detected browser URL: {live_url}", flush=True)
 
-            if "/direct/t/" in live_url:
-                chat_url = live_url
-                save_chat_url(chat_url)
-            else:
-                chat_url = live_url
-                save_chat_url(chat_url)
+            chat_url = live_url
+            save_chat_url(chat_url)
+            context.storage_state(path=str(STATE_FILE))
+            print(f"Saved portable session to: {STATE_FILE}", flush=True)
+
+            if "/direct/t/" not in live_url:
                 print(
                     "Note: URL does not contain '/direct/t/'. Make sure you clicked inside "
                     "the group chat (not just the inbox list) before pressing ENTER.",
@@ -291,7 +365,7 @@ def main() -> None:
                     missing_pane_streak += 1
                     if missing_pane_streak >= MAX_MISSING_PANE_CHECKS:
                         print(
-                            "Chat pane disappeared (possible Wi-Fi drop or refresh). Reloading...",
+                            "Chat pane disappeared (possible disconnect or refresh). Reloading...",
                             flush=True,
                         )
                         if open_and_sync_chat(page, chat_url, headless=args.headless):
@@ -311,32 +385,39 @@ def main() -> None:
 
                     print(f"[Incoming] {text!r}", flush=True)
 
-                    if text in TRIGGERS:
-                        now = time.monotonic()
-                        since_last = now - last_reply_time
-                        if since_last < COOLDOWN_SECONDS:
-                            remaining = COOLDOWN_SECONDS - since_last
-                            print(
-                                f"--> Trigger matched, skipped (cooldown: {remaining:.1f}s left).",
-                                flush=True,
-                            )
-                            continue
+                    reply_text = compute_reply(text)
+                    if not reply_text:
+                        continue
 
-                        delay = random.uniform(REPLY_DELAY_MIN, REPLY_DELAY_MAX)
-                        print(f"--> Trigger matched! Waiting {delay:.2f}s...", flush=True)
-                        time.sleep(delay)
+                    now = time.monotonic()
+                    since_last = now - last_reply_time
+                    if since_last < COOLDOWN_SECONDS:
+                        remaining = COOLDOWN_SECONDS - since_last
+                        print(
+                            f"--> Trigger matched, skipped (cooldown: {remaining:.1f}s left).",
+                            flush=True,
+                        )
+                        continue
 
-                        if send_reply(page, REPLY_TEXT):
-                            last_reply_time = time.monotonic()
-                            print(f"--> Replied '{REPLY_TEXT}'.", flush=True)
-                            time.sleep(0.8)
-                            page.evaluate(SCAN_MESSAGES_JS, {"markOnly": True})
+                    delay = random.uniform(REPLY_DELAY_MIN, REPLY_DELAY_MAX)
+                    print(f"--> Matched '{text.lower()}'! Waiting {delay:.2f}s...", flush=True)
+                    time.sleep(delay)
+
+                    if send_reply(page, reply_text):
+                        last_reply_time = time.monotonic()
+                        print(f"--> Replied: {reply_text!r}", flush=True)
+                        time.sleep(0.8)
+                        page.evaluate(SCAN_MESSAGES_JS, {"markOnly": True})
+                        if use_state_file:
+                            context.storage_state(path=str(STATE_FILE))
 
                 time.sleep(CHECK_INTERVAL_SECONDS)
         except KeyboardInterrupt:
             print("\nBot stopped.", flush=True)
         finally:
             context.close()
+            if browser:
+                browser.close()
 
 
 if __name__ == "__main__":
