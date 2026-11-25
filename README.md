@@ -1,6 +1,11 @@
 # Instagram "Real" Auto-Reply Bot
 
 A lightweight Python + Playwright bot that watches a private Instagram group chat and automatically replies **`Real`** (after a ~2-second delay) whenever another member sends `real` or `Real`.
+If you want to change triggers, change this section of the code:
+```powershell
+TRIGGERS = {"real", "Real"}
+REPLY_TEXT = "Real"
+```
 
 Built for entertainment in private, consenting group chats.
 
