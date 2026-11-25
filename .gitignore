@@ -1,0 +1,10 @@
+ig_profile/
+ig_state.json
+session.json
+chat_url.txt
+.env
+*.key
+
+.venv/
+__pycache__/
+*.pyc
